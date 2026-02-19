@@ -16,45 +16,6 @@ library(pharmaversesdtm)
 
 ct_url <- "https://raw.githubusercontent.com/pharmaverse/examples/main/metadata/sdtm_ct.csv"
 
-#--- helper functions ----------------------------------------------------------
-blank_to_na <- function(x) {
-  x <- as.character(x)
-  x[trimws(x) == ""] <- NA_character_
-  x
-}
-
-norm_chr <- function(x) {
-  x <- blank_to_na(x)
-  toupper(trimws(x))
-}
-
-mk_iso_dtc <- function(dtc_date, dtc_time) {
-  d <- blank_to_na(dtc_date)
-  t <- blank_to_na(dtc_time)
-
-  # Normalize flexible collected time to HH:MM(:SS)
-  t <- ifelse(!is.na(t) & str_detect(t, "^\\d{1,2}$"), sprintf("%02d:00:00", as.integer(t)), t)
-  t <- ifelse(!is.na(t) & str_detect(t, "^\\d{1,2}:\\d{1,2}$"), paste0(t, ":00"), t)
-
-  normalize_hms <- function(v) {
-    if (is.na(v)) return(NA_character_)
-    p <- strsplit(v, ":", fixed = TRUE)[[1]]
-    p <- c(p, rep("00", 3L - length(p)))[1:3]
-    nums <- suppressWarnings(as.integer(p))
-    if (any(is.na(nums))) return(NA_character_)
-    sprintf("%02d:%02d:%02d", nums[1], nums[2], nums[3])
-  }
-
-  t <- vapply(t, normalize_hms, character(1))
-
-  # try common incoming date patterns from raw ds
-  d_iso <- suppressWarnings(as.character(as.Date(d, format = "%m-%d-%Y")))
-  d_iso <- ifelse(is.na(d_iso), suppressWarnings(as.character(as.Date(d, format = "%m/%d/%Y"))), d_iso)
-  d_iso <- ifelse(is.na(d_iso), suppressWarnings(as.character(as.Date(d))), d_iso)
-
-  ifelse(!is.na(d_iso) & !is.na(t), paste0(d_iso, "T", t), d_iso)
-}
-
 #--- input data ----------------------------------------------------------------
 
 ds_raw <- pharmaverseraw::ds_raw %>%
@@ -65,32 +26,48 @@ ds_raw <- pharmaverseraw::ds_raw %>%
 
 study_ct <- readr::read_csv(ct_url, show_col_types = FALSE)
 
-required_cols <- c(
-  "STUDY", "PATNUM", "INSTANCE", "IT.DSTERM", "IT.DSDECOD", "OTHERSP",
-  "DSDTCOL", "DSTMCOL", "IT.DSSDAT"
+
+#--- build KEY variables -----------------------------------
+
+ds_raw<-ds_raw %>% 
+  mutate(
+  DSTERM = toupper(trimws(if_else(!is.na(OTHERSP), OTHERSP, IT.DSTERM))),
+  DSDECOD = toupper(trimws(if_else(!is.na(OTHERSP), OTHERSP, IT.DSDECOD))),
+  DSCAT = case_when(
+    !is.na(OTHERSP) ~ "OTHER EVENT",
+    is.na(OTHERSP) & IT.DSDECOD == "Randomized" ~ "PROTOCOL MILESTONE",
+    is.na(OTHERSP) & IT.DSDECOD != "Randomized" ~ "DISPOSITION EVENT"
+  )
 )
-missing_cols <- setdiff(required_cols, names(ds_raw))
-if (length(missing_cols) > 0) {
-  stop("Missing required columns in pharmaverseraw::ds_raw: ", paste(missing_cols, collapse = ", "))
-}
+  #--- build domain with sdtm.oak assignments -----------------------------------
 
-# DS controlled terminology mapping for reason codelist C66727
-ct_ds <- study_ct %>%
-  filter(codelist_code == "C66727") %>%
-  transmute(
-    collected_value_norm = norm_chr(collected_value),
-    term_value = norm_chr(term_value)
+ds<- 
+  # Map DSDECOD using assign_ct
+  assign_ct(
+    raw_dat = ds_raw,
+    raw_var = "DSDECOD",
+    tgt_var = "DSDECOD",
+    ct_spec = study_ct,
+    ct_clst = "C66727",
+    id_vars = oak_id_vars()
   ) %>%
-  distinct()
-
-#--- build domain with sdtm.oak assignments -----------------------------------
-
-ds <- tibble(
-  oak_id = ds_raw$oak_id,
-  STUDYID = ds_raw$STUDY,
-  DOMAIN = "DS",
-  USUBJID = paste0("01-", ds_raw$PATNUM)
-) %>%
+  # Map DSTERM using assign_ct
+  assign_no_ct(
+    raw_dat = ds_raw,
+    raw_var = "DSTERM",
+    tgt_var = "DSTERM",
+    id_vars = oak_id_vars()
+  )%>%
+  # Map DSCAT using assign_ct
+  assign_ct(
+    raw_dat = ds_raw,
+    raw_var = "DSCAT",
+    tgt_var = "DSCAT",
+    ct_spec = study_ct,
+    ct_clst = "C74558",
+    id_vars = oak_id_vars()
+  ) %>%
+  
   # VISIT from INSTANCE using CT
   assign_ct(
     raw_dat = ds_raw,
@@ -109,75 +86,50 @@ ds <- tibble(
     ct_clst = "VISITNUM",
     id_vars = oak_id_vars()
   ) %>%
-  # IT.DSSDAT -> DSSTDTC using assign_datetime
+  # IT.DSSTDAT -> DSSTDTC using assign_datetime
   assign_datetime(
     raw_dat = ds_raw,
-    raw_var = "IT.DSSDAT",
+    raw_var = "IT.DSSTDAT",
     tgt_var = "DSSTDTC",
-    raw_fmt = c("m/d/y", "m-d-y", "Y-m-d"),
+    raw_fmt = c("m-d-y"),
     id_vars = oak_id_vars()
   ) %>%
-  left_join(
-    ds_raw %>%
-      transmute(
-        oak_id,
-        DSTERM_SRC = blank_to_na(.data[["IT.DSTERM"]]),
-        DSDECOD_SRC = blank_to_na(.data[["IT.DSDECOD"]]),
-        OTHERSP_SRC = blank_to_na(OTHERSP),
-        DSDTCOL_SRC = DSDTCOL,
-        DSTMCOL_SRC = DSTMCOL
-      ),
-    by = "oak_id"
-  ) %>%
-  mutate(
-    # A/B logic requested:
-    DSTERM = if_else(!is.na(OTHERSP_SRC), OTHERSP_SRC, DSTERM_SRC),
-    DSDECOD_RAW = if_else(!is.na(OTHERSP_SRC), OTHERSP_SRC, DSDECOD_SRC),
-    DSDECOD_RAW_NORM = norm_chr(DSDECOD_RAW)
-  ) %>%
-  left_join(ct_ds, by = c("DSDECOD_RAW_NORM" = "collected_value_norm")) %>%
-  mutate(
-    # map term_value when ds_raw value equals collected_value
-    DSDECOD = coalesce(term_value, DSDECOD_RAW_NORM),
-    # C logic requested:
-    DSCAT = case_when(
-      !is.na(OTHERSP_SRC) ~ "OTHER EVENT",
-      norm_chr(DSDECOD_SRC) == "RANDOMIZED" ~ "PROTOCOL MILESTONE",
-      TRUE ~ "DISPOSITION EVENT"
-    ),
-    # DSDTC from DSDTCOL + DSTMCOL
-    DSDTC = mk_iso_dtc(DSDTCOL_SRC, DSTMCOL_SRC)
-  ) %>%
-  select(-DSTERM_SRC, -DSDECOD_SRC, -OTHERSP_SRC, -DSDTCOL_SRC, -DSTMCOL_SRC,
-         -DSDECOD_RAW, -DSDECOD_RAW_NORM, -term_value)
+  # DSDTCOL & DSTMCOL -> DSDTC using assign_datetime
+  assign_datetime(
+    tgt_var = "DSDTC",
+    raw_dat = ds_raw,
+    raw_var = c("DSDTCOL", "DSTMCOL"),
+    raw_fmt = c("m-d-y", "H:M")
+  ) 
 
-# Sequence within subject by term
-# (as requested: rec_vars = c("USUBJID", "DSTERM"))
 ds <- ds %>%
+  dplyr::mutate(
+    STUDYID = ds_raw$STUDY,
+    DOMAIN = "DS",
+    USUBJID = paste0("01-", ds_raw$PATNUM),
+    VISITNUM=as.numeric(stringr::str_extract(VISITNUM, "\\d+\\.?\\d*"))
+    ) %>% 
+  arrange(USUBJID, DSSTDTC, VISITNUM) %>%
+  # Sequence within subject by dsdecod
   derive_seq(
     tgt_var = "DSSEQ",
-    rec_vars = c("USUBJID", "DSTERM")
-  )
-
-# Derive study day from DSSTDTC using DM.RFSTDTC
-# DM from pharmaversesdtm package
-
-ds <- ds %>%
+    rec_vars = c("USUBJID", "DSSTDTC", "DSDECOD")
+  ) %>%
+  # Derive study day from DSSTDTC using DM.RFSTDTC
   derive_study_day(
-    dm_domain = pharmaversesdtm::dm,
+    sdtm_in = .,
+    dm_domain = dm,
     tgdt = "DSSTDTC",
     refdt = "RFSTDTC",
     study_day_var = "DSSTDY"
   )
 
+
 # Final variable order
 ds <- ds %>%
   select(
-    STUDYID, DOMAIN, USUBJID, DSSEQ, DSTERM, DSDECOD, DSCAT,
-    VISITNUM, VISIT, DSDTC, DSSTDTC, DSSTDY
+    STUDYID, DOMAIN, USUBJID, DSSEQ, DSTERM, DSDECOD, DSCAT, VISITNUM, VISIT, DSDTC, DSSTDTC, DSSTDY
   )
-
-print(ds, n = 100)
 
 # Optional export
 # readr::write_csv(ds, "question_2_sdtm/ds.csv", na = "")
