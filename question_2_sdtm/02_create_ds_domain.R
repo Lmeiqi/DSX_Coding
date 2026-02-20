@@ -109,11 +109,11 @@ ds <- ds %>%
     USUBJID = paste0("01-", ds_raw$PATNUM),
     VISITNUM=as.numeric(stringr::str_extract(VISITNUM, "\\d+\\.?\\d*"))
     ) %>% 
-  arrange(USUBJID, DSSTDTC, VISITNUM) %>%
+  arrange(USUBJID, DSDTC) %>%
   # Sequence within subject by dsdecod
   derive_seq(
     tgt_var = "DSSEQ",
-    rec_vars = c("USUBJID", "DSSTDTC", "DSDECOD")
+    rec_vars = c("USUBJID", "DSDTC", "DSDECOD")
   ) %>%
   # Derive study day from DSSTDTC using DM.RFSTDTC
   derive_study_day(
@@ -122,7 +122,12 @@ ds <- ds %>%
     tgdt = "DSSTDTC",
     refdt = "RFSTDTC",
     study_day_var = "DSSTDY"
-  )
+  )%>%
+  dplyr::mutate(
+    DSSTDY=as.numeric(DSSTDY),
+    DSSTDTC=as.character(DSSTDTC),
+    DSDTC=as.character(DSDTC)
+    )
 
 
 # Final variable order
