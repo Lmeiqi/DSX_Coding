@@ -1,25 +1,36 @@
 # Question 4.1: AE Summary Table using {gtsummary}
 
+# Load libraries & data -------------------------------------
 library(dplyr)
 library(gtsummary)
-library(gt)
 library(pharmaverseadam)
 
-adae <- pharmaverseadam::adae
 adsl <- pharmaverseadam::adsl
+adae <- pharmaverseadam::adae
 
-teae <- adae %>%
-  filter(TRTEMFL == "Y") %>%
-  distinct(USUBJID, ACTARM, AETERM)
+# Pre-processing --------------------------------------------
+adae <- adae |>
+  filter(
+    # Treatment-emergent AE
+    TRTEMFL == "Y",
+  )
 
-ae_summary <- teae %>%
-  tbl_cross(
-    row = AETERM,
-    col = ACTARM,
-    percent = "column"
-  ) %>%
-  bold_labels()
+# Build table --------------------------------------------
+tbl <- adae |>
+  tbl_hierarchical(
+    variables = c(AESOC, AETERM),
+    by = ACTARM,
+    id = USUBJID,
+    denominator = adsl,
+    overall_row = TRUE,
+    label = "..ard_hierarchical_overall.." ~ "Treatment Emergent AEs"
+  ) |> 
+  sort_hierarchical()
 
-gt_tbl <- as_gt(ae_summary)
+# Build ard --------------------------------------------
+ard <- gather_ard(tbl)
+ard
 
+# Save --------------------------------------------
+gt_tbl <- as_gt(tbl)
 gtsave(gt_tbl, "question_4_tlg/output/ae_summary_table.html")
